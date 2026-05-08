@@ -1,0 +1,34 @@
+services:
+  api:
+    build: .
+    image: rag-hybrid-search:dev
+    environment:
+      RAG_OPENAI_API_KEY: ${RAG_OPENAI_API_KEY:?set in .env}
+      RAG_INDEX_DIR: /data/.rag-index
+      RAG_API_PORT: "8100"
+    ports:
+      - "8100:8100"
+    volumes:
+      - rag-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8100/health').read()"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  ui:
+    build: .
+    image: rag-hybrid-search:dev
+    profiles: ["ui"]
+    command: ["python", "-m", "streamlit", "run", "src/rag/ui.py", "--server.port=8501", "--server.address=0.0.0.0"]
+    environment:
+      RAG_OPENAI_API_KEY: ${RAG_OPENAI_API_KEY:?set in .env}
+      RAG_INDEX_DIR: /data/.rag-index
+    ports:
+      - "8501:8501"
+    volumes:
+      - rag-data:/data
+    depends_on: [api]
+
+volumes:
+  rag-data:
