@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rag-hybrid-search"
-version = "0.1.0"
-description = "Production-grade RAG with multi-format ingestion, three swappable chunking strategies, hybrid (dense + BM25) retrieval with RRF fusion, cross-encoder reranking, grounded generation with bracketed citations, and LLM-as-judge citation verification."
+version = "1.0.0"
+description = "PRECISION RAG — Reliable Enterprise Retrieval-Augmented Generation. Multi-format ingestion, three chunking strategies, hybrid (dense + BM25) retrieval with RRF fusion, cross-encoder reranking, grounded generation with bracketed citations, LLM-as-judge citation verification, and knowledge-base isolation."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
@@ -41,8 +41,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-ui = ["streamlit>=1.32", "pandas>=2.2"]
+ui = ["streamlit>=1.32", "pandas>=2.2", "requests>=2.27"]
 reranker = ["sentence-transformers>=2.7"]
+docx = ["python-docx>=1.0"]
+pptx = ["python-pptx>=1.0"]
+xlsx = ["openpyxl>=3.1"]
+enterprise = [
+    "python-docx>=1.0",
+    "python-pptx>=1.0",
+    "openpyxl>=3.1",
+]
 dev = [
     "pytest>=8.1",
     "pytest-asyncio>=0.23",
@@ -50,6 +58,7 @@ dev = [
     "respx>=0.21",
     "mypy>=1.10",
     "ruff>=0.4",
+    "httpx2>=2.0",
 ]
 
 [project.scripts]
@@ -71,12 +80,14 @@ filterwarnings = [
     "ignore::DeprecationWarning:httpx.*",
     "ignore::DeprecationWarning:starlette.*",
     "ignore::DeprecationWarning:pypdf.*",
+    "ignore::DeprecationWarning:httpx2.*",
     "ignore::SyntaxWarning",
     # pytest-asyncio + httpx GC race: a test event loop occasionally lands in
     # the unraisable hook *after* the test passes. We catch the warning so it
     # doesn't poison the next test.
     "ignore::pytest.PytestUnraisableExceptionWarning",
     "ignore::ResourceWarning",
+    "ignore::starlette.exceptions.StarletteDeprecationWarning",
 ]
 
 [tool.coverage.run]

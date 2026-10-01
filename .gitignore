@@ -18,6 +18,10 @@ coverage.xml
 .rag-index/
 *.log
 
+# PRECISION RAG runtime data (generated at runtime — not source code)
+precision-rag-data/
+data/
+
 .vscode/
 .idea/
 .DS_Store

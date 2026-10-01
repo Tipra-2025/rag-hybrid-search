@@ -1,204 +1,338 @@
-# rag-hybrid-search
+# 🎯 PRECISION RAG
 
-> A production-grade RAG pipeline. Multi-format ingestion → three swappable chunking strategies → dual indexing (dense + BM25) → Reciprocal Rank Fusion → cross-encoder rerank → grounded generation with bracketed citations → LLM-as-judge citation verification → composite-confidence "I don't know" gate.
+**Reliable Enterprise Retrieval-Augmented Generation**
 
-[![Tests](https://github.com/metehanulusoy/rag-hybrid-search/actions/workflows/test.yml/badge.svg)](https://github.com/metehanulusoy/rag-hybrid-search/actions/workflows/test.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
-[![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
-[![Type checked: mypy](https://img.shields.io/badge/typed-mypy%20strict-blueviolet.svg)](https://mypy-lang.org/)
-
-`rag-hybrid-search` (CLI: `rag`) is a small, opinionated Python package that turns a directory of mixed-format documents into a queryable, citation-verified RAG service. It is designed for teams that want the *production* boxes ticked — strict Pydantic contracts, hybrid retrieval that doesn't depend on per-query score calibration, evidence-backed citations, and a service that refuses to answer rather than hallucinate when the corpus doesn't support it.
+A production-grade, self-hostable RAG platform with full knowledge-base isolation, multi-format ingestion, hybrid retrieval, citation verification, and a polished enterprise UI.
 
 ---
 
-## Why this exists
+## ✨ Features
 
-Most "vector search + LLM" tutorials skip the parts that matter at scale:
-
-- A single chunking strategy that breaks on the document type you actually have.
-- Pure dense retrieval that misses keyword-exact phrases.
-- Score-blended fusion that needs per-query tuning to behave.
-- Free-form citations that aren't auditable.
-- Generators that confidently make things up when retrieval comes back empty.
-
-This project replaces every one of those with something measurable.
+| Feature | Details |
+|---|---|
+| **Knowledge Bases** | Isolated document collections — each with its own dense + BM25 index |
+| **Multi-format ingestion** | Markdown, TXT, HTML, PDF, DOCX, PPTX, XLSX, CSV, JSON |
+| **Three chunking strategies** | Fixed-window, Recursive (paragraph-aware), Semantic (embedding-based) |
+| **Hybrid retrieval** | Dense (OpenAI embeddings) + BM25, fused via Reciprocal Rank Fusion |
+| **Cross-encoder reranking** | LLM-as-judge or `sentence-transformers` cross-encoder |
+| **Grounded generation** | Bracketed inline citations `[1]`, `[2]` with source metadata |
+| **Citation verification** | LLM judge scores each citation for factual grounding |
+| **IDK gate** | Refuses to answer when retrieval confidence is too low |
+| **Document dedup** | SHA-256 content hash prevents re-ingesting the same file |
+| **Per-KB settings** | Chunk size, overlap, top-k, reranker, IDK threshold — all per KB |
+| **Real health dashboard** | Component status derived from actual system state |
+| **Enterprise UI** | Dark-mode Streamlit UI with KB management, chunk inspector, chat |
 
 ---
 
-## Architecture
+## 🏗 Architecture
 
 ```
-                   ┌─────────────────────────────────────────────┐
-docs/  ──load──►   │  Ingestion Pipeline                         │
-mixed              │  • multi-format loader (md / txt / html /pdf)│
-formats            │  • chunker (fixed | recursive | semantic)    │
-                   │  • cosine dedup ≥ 0.95                       │
-                   │  • dual-index (Dense JSON + BM25)            │
-                   └────────────────┬────────────────────────────┘
-                                    │
-                                    ▼
-   query  ────►   ┌─────────────────────────────────────────────┐
-                  │  Hybrid Retrieval                           │
-                  │  • dense top-K (cosine, NumPy)              │
-                  │  • sparse top-K (rank_bm25)                 │
-                  │  • RRF fusion (k = 60)                      │
-                  │  • reranker (LLM | cross-encoder | none)    │
-                  └────────────────┬────────────────────────────┘
-                                   │ top-N RankedHits
-                                   ▼
-                  ┌─────────────────────────────────────────────┐
-                  │  Generation & Citation                       │
-                  │  • grounded prompt (passages + [N] markers)  │
-                  │  • IDK hard gate on low retrieval confidence │
-                  │  • citation parser + LLM-as-judge verifier   │
-                  │  • composite_confidence = w·acc + (1-w)·ret  │
-                  └────────────────┬────────────────────────────┘
-                                   ▼
-                              Answer (text + citations + audit)
+User → Streamlit UI (port 8501)
+              ↕ HTTP
+         FastAPI API (port 8100)
+              ↕
+    ┌─────────────────────────┐
+    │       RagEngine         │
+    │  ┌───────────────────┐  │
+    │  │  IngestionPipeline│  │  ← load → chunk → embed → dedup → index
+    │  └───────────────────┘  │
+    │  ┌───────────────────┐  │
+    │  │  HybridRetriever  │  │  ← dense ANN + BM25 + RRF + reranker
+    │  └───────────────────┘  │
+    │  ┌───────────────────┐  │
+    │  │  GroundedAnswerer │  │  ← prompt + generate + cite + verify + IDK
+    │  └───────────────────┘  │
+    └─────────────────────────┘
+              ↕
+    ┌─────────────────────────┐
+    │  Storage Layer          │
+    │  KnowledgeBaseStore     │  ← data/precision-rag-data/knowledge_bases.json
+    │  DocumentStore          │  ← data/precision-rag-data/docs_<kb_id>.json
+    │  ChunkMetaStore         │  ← data/precision-rag-data/chunks_<kb_id>.json
+    │  DenseVectorStore       │  ← data/indexes/<kb_id>/recursive/dense.json
+    │  BM25Store              │  ← data/indexes/<kb_id>/recursive/sparse.json
+    └─────────────────────────┘
 ```
-
-Five independently testable layers:
-
-1. **Strict Pydantic contracts** — `Document`, `Chunk`, `DenseHit`, `SparseHit`, `FusedHit`, `RankedHit`, `Citation`, `Answer`, `EvalCase`. Every cross-component message is typed.
-2. **Ingestion** — markdown / text / HTML (BeautifulSoup) / PDF (pypdf) loaders. Three swappable chunkers (`FixedTokenChunker`, `RecursiveCharacterChunker`, `SemanticChunker`) behind one `Chunker` ABC. Cosine deduplication on insert (≥ 0.95). Dual-index: JSON-backed dense vector store + BM25.
-3. **Hybrid retrieval** — dense top-K + sparse top-K → Reciprocal Rank Fusion (configurable `k`) → reranker (default `LLMReranker`, optional `CrossEncoderReranker` via the `[reranker]` extra).
-4. **Generation** — grounded prompt that requires bracketed citations on every claim, IDK hard-gate when retrieval confidence is below threshold, citation parser, LLM-as-judge verifier returning per-citation `supported` booleans, composite confidence.
-5. **API + CLI + UI** — FastAPI (`POST /v1/ask`, `POST /v1/ingest`, `GET /health`), Click CLI (`rag ingest|ask|eval|serve|config`), optional Streamlit explorer.
 
 ---
 
-## Quickstart
+## 🚀 Quick Start
+
+### 1. Install
 
 ```bash
-git clone https://github.com/metehanulusoy/rag-hybrid-search
-cd rag-hybrid-search
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
+# Core + enterprise format support (DOCX, PPTX, XLSX) + UI
+pip install -e ".[enterprise,ui]"
 
+# With dev tools
+pip install -e ".[enterprise,ui,dev]"
+```
+
+### 2. Configure
+
+```bash
+# Required: your OpenAI API key
 export RAG_OPENAI_API_KEY=sk-...
 
-# 1. Ingest a directory (markdown, txt, html, pdf — autodetected).
-rag ingest --path ./docs/
-
-# 2. Ask a question.
-rag ask --question "What does RRF fusion do?"
-# →
-# Reciprocal Rank Fusion combines two ranked lists by summing 1/(k+rank), …  [1][2]
-#
-# [retrieval=0.78 citations=1.00 composite=0.89 idk=False]
-#   [1] RRF · ./docs/retrieval/fusion.md
-#   [2] Why hybrid search · ./docs/retrieval/why-hybrid.md
-
-# 3. Run the golden eval set.
-rag eval --cases eval/golden_qa.jsonl
-
-# 4. Serve.
-rag serve   # http://localhost:8100
+# Optional overrides (see .env.example for full list)
+export RAG_GENERATION_MODEL=gpt-4o
+export RAG_EMBEDDING_MODEL=text-embedding-3-small
+export RAG_RERANK_KIND=llm           # llm | cross-encoder | none
+export RAG_IDK_RETRIEVAL_THRESHOLD=0.35
 ```
 
-Optional Streamlit UI (`pip install -e ".[ui]"`):
+Copy `.env.example` to `.env` and edit as needed — it's auto-loaded.
+
+### 3. Start the backend
 
 ```bash
-streamlit run -m rag.ui
+rag serve
+# or
+python scripts/start_server.py
+```
+
+API: http://localhost:8100  
+Swagger docs: http://localhost:8100/docs
+
+### 4. Start the UI
+
+```bash
+streamlit run src/rag/ui.py
+```
+
+UI: http://localhost:8501
+
+### 5. Load demo data
+
+With the backend running:
+
+```bash
+python scripts/load_demo_data.py
+```
+
+This creates an **"Acme HR Policies"** knowledge base with 5 enterprise documents (employee handbook, leave policy, IT security policy, expense policy, travel policy).
+
+---
+
+## 📖 Usage
+
+### CLI
+
+```bash
+# Ingest documents (into the default global index)
+rag ingest --path ./docs/
+
+# Ask a question (against the default index)
+rag ask --question "What is the maternity leave policy?"
+
+# Run evaluations
+rag eval --cases golden_qa.jsonl
+
+# Start the API server
+rag serve
+
+# Print resolved configuration
+rag config
+```
+
+### API
+
+```bash
+# Health check
+curl http://localhost:8100/health
+
+# System stats
+curl http://localhost:8100/system/stats
+
+# Create a knowledge base
+curl -X POST http://localhost:8100/knowledge-bases \
+  -H "Content-Type: application/json" \
+  -d '{"name": "HR Policies", "description": "Human resources documentation"}'
+
+# Upload a document
+curl -X POST http://localhost:8100/knowledge-bases/<kb_id>/documents \
+  -F "file=@./handbook.pdf"
+
+# List documents in a KB
+curl http://localhost:8100/knowledge-bases/<kb_id>/documents
+
+# Inspect chunks
+curl "http://localhost:8100/knowledge-bases/<kb_id>/chunks?limit=50&search=password"
+
+# Ask a question (global index)
+curl -X POST http://localhost:8100/v1/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What is the sick leave entitlement?"}'
 ```
 
 ---
 
-## API
+## 🗂 Project Structure
 
-| Method | Path | Purpose |
-|---|---|---|
-| `POST` | `/v1/ask` | Run the full pipeline; returns `Answer`. |
-| `POST` | `/v1/ingest` | Ingest a path (file or directory); returns `IngestionReport`. |
-| `GET` | `/health` | Liveness + index size. |
-
-`Answer` carries every audit field worth keeping:
-
-```json
-{
-  "request_id": "...",
-  "question": "What does RRF fusion do?",
-  "text": "Reciprocal Rank Fusion combines two ranked lists by summing 1/(k+rank), …  [1][2]",
-  "citations": [
-    {"marker": "[1]", "chunk_id": "chunk_…", "source": "./docs/retrieval/fusion.md", "title": "RRF", "quote": "…"}
-  ],
-  "used_chunks": [...],
-  "retrieval_confidence": 0.78,
-  "citation_accuracy": 1.00,
-  "composite_confidence": 0.89,
-  "is_idk": false,
-  "model": "gpt-4o",
-  "latency_ms": 1842
-}
+```
+rag-hybrid-search/
+├── src/rag/
+│   ├── api/app.py              # FastAPI app (KB + legacy v1 endpoints)
+│   ├── cli.py                  # Click CLI (ingest, ask, eval, serve, config)
+│   ├── ui.py                   # Streamlit enterprise UI
+│   ├── config.py               # Pydantic Settings (env vars / .env)
+│   ├── models.py               # Core Pydantic models (Document, Chunk, Answer…)
+│   ├── engine.py               # RagEngine: retrieve → generate → verify loop
+│   ├── llm_client.py           # Async OpenAI-compatible HTTP client
+│   ├── logging.py              # structlog JSON logging
+│   ├── ingestion/
+│   │   ├── pipeline.py         # IngestionPipeline: load → chunk → embed → index
+│   │   ├── loaders.py          # md / txt / html / pdf loaders
+│   │   └── chunkers.py         # Fixed / Recursive / Semantic chunkers
+│   ├── retrieval/
+│   │   ├── retriever.py        # HybridRetriever: dense + BM25 + RRF
+│   │   ├── reranker.py         # LLM reranker + cross-encoder + NoOp
+│   │   └── fusion.py           # Reciprocal Rank Fusion
+│   ├── generation/
+│   │   ├── answerer.py         # GroundedAnswerer + citation parser
+│   │   └── verifier.py         # Citation verification + IDK gate
+│   ├── store/
+│   │   ├── dense.py            # DenseVectorStore (flat JSON + cosine ANN)
+│   │   └── sparse.py           # BM25Store (rank-bm25)
+│   ├── storage/                # NEW: enterprise metadata layer
+│   │   ├── knowledge_base.py   # KnowledgeBaseStore (CRUD, JSON-backed)
+│   │   ├── document_store.py   # DocumentStore (per-KB, status tracking)
+│   │   ├── chunk_meta.py       # ChunkMetaStore (chunk inspection, search)
+│   │   └── models.py           # Storage Pydantic models
+│   └── services/               # NEW: business logic services
+│       ├── kb_service.py       # KnowledgeBaseService (index isolation)
+│       ├── ingestion_service.py # IngestionService (extended formats + metadata)
+│       └── health_service.py   # HealthService (real component status)
+├── tests/
+│   ├── test_api.py             # Legacy API endpoint tests
+│   ├── test_kb_service.py      # NEW: KB service + new API endpoint tests
+│   ├── test_storage.py         # NEW: Storage layer unit tests
+│   ├── test_chunkers.py
+│   ├── test_loaders.py
+│   ├── test_retrieval_and_generation.py
+│   ├── test_stores_and_fusion.py
+│   ├── test_models_and_config.py
+│   └── test_llm_and_logging.py
+├── demo_docs/                  # NEW: 5 enterprise sample documents
+│   ├── employee_handbook.md
+│   ├── leave_policy.md
+│   ├── it_security_policy.md
+│   ├── expense_policy.md
+│   └── travel_policy.md
+├── scripts/
+│   ├── load_demo_data.py       # NEW: Creates demo KB + ingests docs
+│   └── start_server.py        # NEW: Standalone server startup
+└── pyproject.toml
 ```
 
 ---
 
-## Configuration
+## ⚙️ Configuration Reference
 
-| Variable | Default | Purpose |
+All settings are read from environment variables (or a `.env` file). Prefix: `RAG_`.
+
+| Variable | Default | Description |
 |---|---|---|
-| `RAG_OPENAI_API_KEY` | _(required)_ | OpenAI API key. |
-| `RAG_EMBEDDING_MODEL` | `text-embedding-3-small` | Embeddings model. |
-| `RAG_GENERATION_MODEL` | `gpt-4o` | Grounded answerer model. |
-| `RAG_JUDGE_MODEL` | `gpt-4o-mini` | LLM-as-judge for citation verification. |
-| `RAG_RERANK_MODEL` | `gpt-4o-mini` | Used when `RAG_RERANK_KIND=llm`. |
-| `RAG_CHUNKING_STRATEGY` | `recursive` | `fixed` / `recursive` / `semantic`. |
-| `RAG_CHUNK_SIZE_TOKENS` | `512` | Token budget per chunk. |
-| `RAG_CHUNK_OVERLAP_TOKENS` | `64` | Overlap; must be `<` chunk size. |
-| `RAG_DEDUP_COSINE_THRESHOLD` | `0.95` | Skip ingest if cosine ≥ this against existing chunks. |
-| `RAG_DENSE_TOP_K` | `20` | Dense retriever top-K. |
-| `RAG_SPARSE_TOP_K` | `20` | Sparse retriever top-K. |
-| `RAG_RRF_K` | `60` | Reciprocal Rank Fusion `k`. |
-| `RAG_FINAL_TOP_K` | `5` | Chunks passed to the generator after rerank. |
-| `RAG_RERANK_KIND` | `llm` | `llm` / `cross-encoder` / `none`. |
-| `RAG_IDK_RETRIEVAL_THRESHOLD` | `0.35` | Below this → "I don't know." with no LLM call. |
-| `RAG_JUDGE_WEIGHT` | `0.5` | Composite blend: `w·citation_accuracy + (1-w)·retrieval`. |
-| `RAG_INDEX_DIR` | `./.rag-index` | Per-strategy index root. |
-| `RAG_API_PORT` | `8100` | FastAPI port. |
-
-The strategy is namespaced inside the index dir, so two strategies can coexist on disk and be evaluated head-to-head with the golden Q&A set.
-
----
-
-## Performance targets
-
-- **Corpus:** 10K–100K chunks. JSON-backed cosine top-K is sub-millisecond at this scale; ChromaDB / Qdrant migration path documented.
-- **Query latency P95 < 3 s** (retrieval + rerank + generation). The IDK gate skips the generation roundtrip when retrieval is clearly empty.
-- **Faithfulness > 90 %** — measured via the citation verifier; every non-IDK answer reports it as `citation_accuracy`.
-- **Citation accuracy > 95 %** on grounded queries — this is the same `citation_accuracy` metric, audited per request.
-- **Incremental ingestion** — content-hash skip plus chunk_id stability means re-ingesting an unchanged corpus is a no-op (no embeddings, no LLM calls).
-- **Eval suite** — 5-row sample golden set under `eval/`; teams should grow it to 50+ to match the spec target before promotion.
+| `RAG_OPENAI_API_KEY` | *(required)* | OpenAI (or compatible) API key |
+| `RAG_OPENAI_BASE_URL` | `https://api.openai.com/v1` | Base URL for API calls |
+| `RAG_GENERATION_MODEL` | `gpt-4o` | LLM for answer generation |
+| `RAG_EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model |
+| `RAG_JUDGE_MODEL` | `gpt-4o-mini` | LLM for citation judging |
+| `RAG_RERANK_KIND` | `llm` | `llm` \| `cross-encoder` \| `none` |
+| `RAG_RERANK_MODEL` | `gpt-4o-mini` | Model for LLM reranker |
+| `RAG_CHUNKING_STRATEGY` | `recursive` | `recursive` \| `fixed` \| `semantic` |
+| `RAG_CHUNK_SIZE_TOKENS` | `512` | Target tokens per chunk |
+| `RAG_CHUNK_OVERLAP_TOKENS` | `64` | Overlap between adjacent chunks |
+| `RAG_DENSE_TOP_K` | `20` | Candidates from dense retrieval |
+| `RAG_SPARSE_TOP_K` | `20` | Candidates from BM25 |
+| `RAG_RRF_K` | `60` | RRF rank-discount factor |
+| `RAG_FINAL_TOP_K` | `5` | Passages sent to LLM after reranking |
+| `RAG_IDK_RETRIEVAL_THRESHOLD` | `0.35` | Below this → "I don't know" |
+| `RAG_JUDGE_WEIGHT` | `0.5` | `w·citation_acc + (1-w)·retrieval` |
+| `RAG_DEDUP_COSINE_THRESHOLD` | `0.95` | Cosine similarity above → dedup |
+| `RAG_INDEX_DIR` | `data/index` | Where to store index files |
+| `RAG_API_HOST` | `0.0.0.0` | API server bind address |
+| `RAG_API_PORT` | `8100` | API server port |
+| `RAG_LOG_LEVEL` | `INFO` | Log level |
 
 ---
 
-## Project standards
+## 🧪 Testing
 
-- **Versioned chunking strategies** so runs can be compared side-by-side. `Chunker` ABC + per-strategy index directories.
-- **Deduplication on ingestion** at cosine ≥ 0.95 — configurable via `RAG_DEDUP_COSINE_THRESHOLD`.
-- **Structured citation format** — every claim ends with `[N]`, parsed with a deterministic regex, verified with an LLM-as-judge.
-- **Eval suite must pass before deploy** — `rag eval --cases eval/golden_qa.jsonl` returns a non-zero exit if confident-pass falls below an acceptance threshold (callers wire this into CI).
-- **"I don't know" is acceptable output** — hard-gated on retrieval confidence; no LLM call when retrieval is clearly empty.
-- **Type-safe.** `mypy --strict` with `pydantic.mypy`. `ruff` lint clean.
-- **Tested.** `httpx.MockTransport` + deterministic hash-derived pseudo-embeddings; no real network in CI.
+```bash
+# Run all 90 tests
+pytest
+
+# With coverage
+pytest --cov=rag --cov-report=term-missing
+
+# Specific test modules
+pytest tests/test_storage.py -v
+pytest tests/test_kb_service.py -v
+```
+
+All tests use mock LLM clients — no real API calls are made during tests.
 
 ---
 
-## Architecture decision records
+## 📐 Design Decisions
 
-- [`docs/ADR-001-three-chunking-strategies.md`](docs/ADR-001-three-chunking-strategies.md) — Why three chunkers behind one ABC, swap via config.
-- [`docs/ADR-002-rrf-fusion.md`](docs/ADR-002-rrf-fusion.md) — Why Reciprocal Rank Fusion instead of score-normalized linear blending.
-- [`docs/ADR-003-confidence-and-idk.md`](docs/ADR-003-confidence-and-idk.md) — Why a hard IDK gate plus a composite confidence score.
+### Why flat-file JSON storage?
+The current `DenseVectorStore` and `BM25Store` use flat JSON files. The new `storage/` layer mirrors this approach for maximum simplicity and zero infrastructure dependencies. Swapping to SQLite or PostgreSQL only requires implementing a new store that satisfies the same interface.
+
+### Why not replace the retrieval engine?
+The existing dense + BM25 + RRF + reranker + grounded generation pipeline was already production-quality. PRECISION RAG adds the enterprise wrapper (KB isolation, document management, metadata, UI) **around** it — not replacing it.
+
+### Why per-KB index isolation?
+Each knowledge base gets its own `DenseVectorStore` and `BM25Store` under `data/indexes/<kb_id>/`. This means queries against KB-A can never return documents from KB-B, regardless of score similarity.
+
+### Confidence score formula
+`composite = judge_weight × citation_accuracy + (1 - judge_weight) × retrieval_confidence`
+
+The IDK gate fires when `retrieval_confidence < idk_threshold`, before LLM generation is attempted, saving tokens.
+
+---
+
+## 🔌 API Reference
+
+Full Swagger UI at: http://localhost:8100/docs
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/health` | Detailed component health |
+| `GET` | `/system/stats` | System-wide KB/doc/chunk counts |
+| `GET` | `/knowledge-bases` | List all knowledge bases |
+| `POST` | `/knowledge-bases` | Create a knowledge base |
+| `GET` | `/knowledge-bases/{id}` | Get KB details |
+| `PATCH` | `/knowledge-bases/{id}` | Update KB name/description |
+| `PUT` | `/knowledge-bases/{id}/settings` | Update KB retrieval settings |
+| `DELETE` | `/knowledge-bases/{id}` | Delete KB + all its data |
+| `GET` | `/knowledge-bases/{id}/documents` | List documents |
+| `POST` | `/knowledge-bases/{id}/documents` | Upload + ingest document |
+| `GET` | `/knowledge-bases/{id}/documents/{doc_id}` | Get document |
+| `DELETE` | `/knowledge-bases/{id}/documents/{doc_id}` | Delete document |
+| `POST` | `/knowledge-bases/{id}/documents/{doc_id}/reindex` | Re-ingest document |
+| `GET` | `/knowledge-bases/{id}/chunks` | List chunks (filterable) |
+| `POST` | `/knowledge-bases/{id}/ingest` | Ingest server-side file path |
+| `POST` | `/v1/ask` | Ask question (global index) |
+| `POST` | `/v1/ingest` | Ingest path (global index) |
+
+---
+
+## 🗺 Roadmap (Phase 2)
+
+- [ ] Cross-KB federated search
+- [ ] Evaluation dashboard with golden Q&A sets
+- [ ] SQLite-backed storage for production deployments
+- [ ] Streaming `/v1/ask` response (SSE)
+- [ ] KB-scoped chat (query specific KB, not global index)
+- [ ] User authentication + multi-tenancy
+- [ ] Async background ingestion with progress polling
+- [ ] Auto-chunking strategy selection based on document type
 
 ---
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
-
----
-
-## Acknowledgments
-
-Built collaboratively with **Claude Opus 4.7** as a co-author. Architecture and code review benefited from Anthropic's models throughout.
+MIT

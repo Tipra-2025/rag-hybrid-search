@@ -1,4 +1,4 @@
-"""CLI: ingest, ask, eval, serve."""
+"""CLI: ingest, ask, eval, serve — updated for PRECISION RAG."""
 
 from __future__ import annotations
 
@@ -19,6 +19,8 @@ from .llm_client import LLMClient
 from .logging import configure as configure_logging
 from .models import EvalCase
 from .retrieval import HybridRetriever, reranker_for
+from .services import HealthService, IngestionService, KnowledgeBaseService
+from .storage import ChunkMetaStore, DocumentStore, KnowledgeBaseStore
 from .store import BM25Store, DenseVectorStore
 
 
@@ -78,18 +80,42 @@ def _build_state(settings: Settings | None = None) -> AppState:
         judge_model=settings.judge_model,
         judge_weight=settings.judge_weight,
     )
+
+    # Initialize KB services
+    data_root = settings.index_dir.parent / "precision-rag-data"
+    kb_store = KnowledgeBaseStore(data_root / "knowledge_bases.json")
+    doc_store = DocumentStore(data_root)
+    chunk_meta = ChunkMetaStore(data_root)
+    kb_service = KnowledgeBaseService(
+        kb_store=kb_store,
+        doc_store=doc_store,
+        chunk_meta_store=chunk_meta,
+        data_root=data_root,
+    )
+    ingestion_service = IngestionService(
+        kb_service=kb_service,
+        doc_store=doc_store,
+        chunk_meta_store=chunk_meta,
+        llm_client=client,
+        embedding_model=settings.embedding_model,
+    )
+    health_service = HealthService(settings=settings, llm_client=client)
+
     return AppState(
         client=client,
         engine=engine,
         ingestion=ingestion,
         dense=dense,
         sparse=sparse,
+        kb_service=kb_service,
+        ingestion_service=ingestion_service,
+        health_service=health_service,
     )
 
 
 @click.group()
 def main() -> None:
-    """rag-hybrid-search CLI."""
+    """PRECISION RAG CLI — Reliable Enterprise Retrieval-Augmented Generation."""
 
 
 @main.command("ingest")
